@@ -1,5 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { FiSettings, FiFile, FiFolder, FiSave, FiShare2, FiSearch, FiMaximize, FiChevronDown, FiGlobe, FiShuffle, FiArrowUp, FiArrowDown, FiPlay, FiSquare, FiHelpCircle, FiImage, FiDroplet } from 'react-icons/fi'
+import Header from './components/Header'
+import Wheel from './components/Wheel'
+import Sidebar from './components/Sidebar'
+import WinnerModal from './components/WinnerModal'
+import CustomizeModal, { THEMES, PALETTE_COLORS } from './components/CustomizeModal'
+import { playTickSound, playApplauseSound, playClickSound, speakName } from './utils/audio'
+import { launchConfetti } from './utils/confetti'
+import { parseExcelFile } from './utils/excel'
+import { exportWinnersToPdf } from './utils/pdf'
+import { FiMaximize } from 'react-icons/fi'
 import './App.css'
 
 function App() {
@@ -13,11 +22,8 @@ function App() {
   const [rotation, setRotation] = useState(0)
   const [isSpinning, setIsSpinning] = useState(false)
   const [isSidebarHidden, setIsSidebarHidden] = useState(false)
-  const [slowRotation, setSlowRotation] = useState(0)
-  const [currentRotation, setCurrentRotation] = useState(0)
   const [showWinner, setShowWinner] = useState(false)
   const [winner, setWinner] = useState(null)
-  const [frozenRotation, setFrozenRotation] = useState(null) // Store frozen rotation value as state
   const [showCustomize, setShowCustomize] = useState(false)
   const [customizeTab, setCustomizeTab] = useState('during-spin')
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -40,106 +46,107 @@ function App() {
     playClickSoundOnRemove: false,
     oneColorPerSection: true,
     wheelBackgroundImage: false,
-    selectedTheme: '',
-    colorPalettes: [true, true, true, true, true, false, false, false],
+    wheelBackgroundPattern: 'cookie',
+    selectedTheme: 'Default',
+    customColors: ['#ffd900', '#00b100', '#00c3ff', '#ff4040', '#ff8c00', '#a855f7', '#ec4899', '#14b8a6'],
+    colorPalettes: [true, true, true, true, false, false, false, false],
     centerImage: '',
     imageSize: 'S',
     pageBackgroundColor: false,
+    pageBgColor: '#18181b',
     displayColorGradient: true,
     contours: false,
     wheelShadow: true,
     pointerChangesColor: true
   })
-  const wheelRef = useRef(null)
-  const winnerProcessedRef = useRef(false)
-  const animationFrameRef = useRef(null)
-  const animationCompletedRef = useRef(false) // Track if animation is completed
-  const frozenRotationRef = useRef(null) // Store frozen rotation immediately (synchronous)
-  const slowRotationFrameRef = useRef(null) // For slow rotation animation
-  const currentRotationFrameRef = useRef(null) // For current rotation updates
 
-  // Continuous slow rotation - optimized for smoothness using requestAnimationFrame
+  const wheelRef = useRef(null)
+  const rotationRef = useRef(0)
+  const animationFrameRef = useRef(null)
+  const lastTickAngleRef = useRef(0)
+  const isSpinningRef = useRef(false)
+  const hasWinnerProcessedRef = useRef(false)
+  const slowRafRef = useRef(null)
+
+  // Compute active colors from checked custom palette colors
+  const palette = settings.customColors || PALETTE_COLORS
+  const checkedColors = palette.filter((_, idx) => settings.colorPalettes[idx])
+  const activeColors = checkedColors.length > 0 ? checkedColors : palette.slice(0, 4)
+
+  // Compute active pool considering displayDuplicates and maxNamesVisible settings
+  let activePool = names
+  if (settings.displayDuplicates === false) {
+    activePool = [...new Set(names)]
+  }
+  const maxAllowed = settings.maxNamesVisible || 1000
+  if (activePool.length > maxAllowed) {
+    activePool = activePool.slice(0, maxAllowed)
+  }
+
+  // Sync ref with rotation state
   useEffect(() => {
-    // Cancel any existing slow rotation animation
-    if (slowRotationFrameRef.current) {
-      cancelAnimationFrame(slowRotationFrameRef.current)
-      slowRotationFrameRef.current = null
-    }
-    
-    // Stop slow rotation when spinning, when winner is found, or when pop-up is shown
-    if (isSpinning || winner || showWinner) {
+    rotationRef.current = rotation
+  }, [rotation])
+
+  // Idle slow rotation (if settings.spinSlowly is enabled and not spinning)
+  useEffect(() => {
+    if (!settings.spinSlowly || isSpinning || showWinner) {
+      if (slowRafRef.current) {
+        cancelAnimationFrame(slowRafRef.current)
+        slowRafRef.current = null
+      }
       return
     }
-    
-    let lastTime = performance.now()
-    
-    const animateSlow = (currentTime) => {
-      // Check if we should stop (conditions may have changed)
-      if (isSpinning || winner || showWinner) {
-        slowRotationFrameRef.current = null
-        return
-      }
-      
-      const delta = currentTime - lastTime
-      lastTime = currentTime
-      
-      // Update slow rotation smoothly (1.5 degrees per 50ms = 30 degrees per second)
-      setSlowRotation(prev => (prev + (1.5 * delta / 50)) % 360)
-      
-      slowRotationFrameRef.current = requestAnimationFrame(animateSlow)
-    }
-    
-    slowRotationFrameRef.current = requestAnimationFrame(animateSlow)
-    return () => {
-      if (slowRotationFrameRef.current) {
-        cancelAnimationFrame(slowRotationFrameRef.current)
-        slowRotationFrameRef.current = null
-      }
-    }
-  }, [isSpinning, winner, showWinner])
 
-  // Update current rotation continuously (for pointer color) - optimized
-  useEffect(() => {
-    // Cancel any existing current rotation animation
-    if (currentRotationFrameRef.current) {
-      cancelAnimationFrame(currentRotationFrameRef.current)
-      currentRotationFrameRef.current = null
+    let lastTime = performance.now()
+
+    const tickSlow = (now) => {
+      const delta = now - lastTime
+      lastTime = now
+      const newRot = (rotationRef.current + (18 * delta / 1000)) % 360
+      rotationRef.current = newRot
+      setRotation(newRot)
+      slowRafRef.current = requestAnimationFrame(tickSlow)
     }
-    
-    if (isSpinning || winner || showWinner || frozenRotation !== null) {
-      return // Don't update during spin or when winner is determined or when frozen
-    }
-    
-    // Use requestAnimationFrame for smoother updates
-    const updateRotation = () => {
-      // Check conditions on each frame (may have changed)
-      if (isSpinning || winner || showWinner || frozenRotation !== null) {
-        currentRotationFrameRef.current = null
-        return
-      }
-      
-      setCurrentRotation(slowRotation + rotation)
-      currentRotationFrameRef.current = requestAnimationFrame(updateRotation)
-    }
-    
-    currentRotationFrameRef.current = requestAnimationFrame(updateRotation)
+
+    slowRafRef.current = requestAnimationFrame(tickSlow)
     return () => {
-      if (currentRotationFrameRef.current) {
-        cancelAnimationFrame(currentRotationFrameRef.current)
-        currentRotationFrameRef.current = null
+      if (slowRafRef.current) {
+        cancelAnimationFrame(slowRafRef.current)
+        slowRafRef.current = null
       }
     }
-  }, [slowRotation, rotation, isSpinning, winner, showWinner, frozenRotation])
+  }, [settings.spinSlowly, isSpinning, showWinner])
+
+  // Cleanup animation frame on unmount
+  useEffect(() => {
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+      if (slowRafRef.current) {
+        cancelAnimationFrame(slowRafRef.current)
+      }
+    }
+  }, [])
 
   const addName = () => {
-    if (newName.trim() && !names.includes(newName.trim())) {
-      setNames([...names, newName.trim()])
+    const trimmed = newName.trim()
+    if (trimmed) {
+      setNames(prev => [...prev, trimmed])
       setNewName('')
     }
   }
 
-  const removeName = (nameToRemove) => {
-    setNames(names.filter(name => name !== nameToRemove))
+  const removeName = (indexToRemove, nameToRemove) => {
+    if (settings.playClickSoundOnRemove) {
+      playClickSound(settings.volume)
+    }
+    if (typeof indexToRemove === 'number') {
+      setNames(prev => prev.filter((_, idx) => idx !== indexToRemove))
+    } else {
+      setNames(prev => prev.filter(name => name !== nameToRemove))
+    }
   }
 
   const shuffleNames = () => {
@@ -154,1050 +161,338 @@ function App() {
     setNames(sorted)
   }
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter') {
-      addName()
-    }
-  }
-
-  const spinWheel = useCallback(() => {
-    if (isSpinning || names.length === 0) return
-    
-    // Cancel any existing animation
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current)
-      animationFrameRef.current = null
-    }
-    
-    // Clear frozen rotation when starting new spin
-    frozenRotationRef.current = null
-    setFrozenRotation(null)
-    animationCompletedRef.current = false // Reset completion flag
-    
-    setIsSpinning(true)
-    const startRotation = currentRotation
-    // Capture slowRotation at the start of spin (when button is clicked)
-    const initialSlowRotation = slowRotation
-    
-    // Calculate random rotation (multiple full spins + random angle)
-    const spins = 5 + Math.random() * 5 // 5-10 full spins
-    winnerProcessedRef.current = false
-    
-    setRotation(prevRotation => {
-      const randomAngle = Math.random() * 360
-      const totalRotation = prevRotation + spins * 360 + randomAngle
-      // Use initialSlowRotation (captured at spin start) for endRotation calculation
-      const endRotation = initialSlowRotation + totalRotation
-      
-      // Animate currentRotation during spin to update pointer color
-      const duration = settings.spinTime * 1000 // Use spin time setting in milliseconds
-      const startTime = performance.now() // Use performance.now() for more precise timing
-      
-      // Easing function: starts fast, slows down at the end (ease-out)
-      // This makes the wheel spin fast immediately and gradually slow down
-      const ease = (t) => {
-        // Ease-out cubic: starts fast, slows down smoothly
-        return 1 - Math.pow(1 - t, 3)
-      }
-      
-      const animate = () => {
-        // Prevent any further execution if already completed
-        if (animationCompletedRef.current) {
-          if (animationFrameRef.current) {
-            cancelAnimationFrame(animationFrameRef.current)
-            animationFrameRef.current = null
-          }
-          return
-        }
-        
-        const elapsed = performance.now() - startTime
-        const progress = Math.min(elapsed / duration, 1)
-        
-        if (progress < 1) {
-          // Check again if completed (in case it was set elsewhere)
-          if (animationCompletedRef.current) {
-            return
-          }
-          const easedProgress = ease(progress)
-          const current = startRotation + (endRotation - startRotation) * easedProgress
-          setCurrentRotation(current)
-          // Only schedule next frame if not completed
-          if (!animationCompletedRef.current) {
-            animationFrameRef.current = requestAnimationFrame(animate)
-          }
-        } else {
-          // Animation complete - stop IMMEDIATELY at exact target
-          // Mark as completed IMMEDIATELY to prevent any further frames
-          animationCompletedRef.current = true
-          
-          // Cancel animation frame immediately
-          if (animationFrameRef.current) {
-            cancelAnimationFrame(animationFrameRef.current)
-            animationFrameRef.current = null
-          }
-          
-          // Set to EXACT endRotation - no calculation, no easing, just the exact target
-          // This prevents any overshoot or movement past the target
-          // The actual displayed rotation will be endRotation
-          const actualDisplayRotation = endRotation
-          setCurrentRotation(actualDisplayRotation)
-          
-          // Freeze wheel at exact final position immediately - DO NOT CHANGE THIS
-          frozenRotationRef.current = actualDisplayRotation
-          setFrozenRotation(actualDisplayRotation)
-          setSlowRotation(initialSlowRotation)
-          
-          // Only process winner once
-          if (!winnerProcessedRef.current) {
-            winnerProcessedRef.current = true
-            
-            // Calculate winner using the FROZEN rotation value
-            // This MUST match what's visually displayed
-            const frozenRot = frozenRotationRef.current // Use the frozen value directly
-            const sliceAngle = 360 / names.length
-            const R = ((frozenRot % 360) + 360) % 360
-            
-            // Calculate which slice is at the pointer (0°)
-            // Method: Find which slice's START edge is closest to 0° after rotation
-            // This matches what the user sees visually
-            
-            let minDistance = Infinity
-            let selectedIndex = 0
-            
-            for (let i = 0; i < names.length; i++) {
-              // Slice i starts at: startAngle = (i * sliceAngle - 90°)
-              const sliceStartAngle = (i * sliceAngle - 90 + 360) % 360
-              
-              // After rotation R, this start is at: (sliceStartAngle + R) % 360
-              const rotatedStart = (sliceStartAngle + R) % 360
-              
-              // Calculate distance from pointer (0°) to this rotated start
-              // Handle wrap-around (e.g., 350° is close to 0°)
-              let distance = Math.abs(rotatedStart - 0)
-              if (distance > 180) {
-                distance = 360 - distance
-              }
-              
-              // Also check the slice's end edge
-              const sliceEndAngle = ((i + 1) * sliceAngle - 90 + 360) % 360
-              const rotatedEnd = (sliceEndAngle + R) % 360
-              let distanceEnd = Math.abs(rotatedEnd - 0)
-              if (distanceEnd > 180) {
-                distanceEnd = 360 - distanceEnd
-              }
-              
-              // Use the minimum distance (either start or end edge)
-              const minDist = Math.min(distance, distanceEnd)
-              
-              // If this slice contains the pointer (0°), it's the winner
-              // A slice contains 0° if its rotated range includes 0°
-              const startNorm = rotatedStart
-              const endNorm = rotatedEnd
-              const containsPointer = (startNorm <= endNorm && 0 >= startNorm && 0 < endNorm) ||
-                                     (startNorm > endNorm && (0 >= startNorm || 0 < endNorm))
-              
-              if (containsPointer || (minDist < minDistance && minDist < sliceAngle / 2)) {
-                minDistance = minDist
-                selectedIndex = i
-              }
-            }
-            
-            // Ensure valid index
-            selectedIndex = selectedIndex % names.length
-            if (selectedIndex < 0) {
-              selectedIndex = (selectedIndex + names.length) % names.length
-            }
-            
-            const winnerName = names[selectedIndex]
-            const winnerColor = colors[selectedIndex % colors.length]
-            
-            // CRITICAL: Set winner WITHOUT changing frozen rotation
-            // The wheel is already frozen at the correct visual position
-            // We just need to identify which slice is there - DO NOT move the wheel
-            setWinner({ name: winnerName, color: winnerColor, index: selectedIndex })
-            // Add winner to results
-            setResults(prev => [...prev, winnerName])
-            setActiveTab('results')
-            
-            // THEN stop spinning - winner is already set so wheel will stay frozen
-            // IMPORTANT: frozenRotationRef.current is already set and must NOT change
-            setIsSpinning(false)
-            
-            // Reset ref after processing
-            winnerProcessedRef.current = false
-            
-            // Wait exactly 1 second after wheel stops, then show pop-up
-            // Wheel remains frozen during this time and until pop-up is closed
-            setTimeout(() => {
-              setShowWinner(true)
-            }, 1000)
-          }
-        }
-      }
-      
-      // Start animation immediately on next frame
-      // Set initial rotation to show wheel has started
-      setCurrentRotation(startRotation)
-      animationFrameRef.current = requestAnimationFrame(animate)
-      
-      return totalRotation
-    })
-  }, [isSpinning, names, currentRotation, slowRotation, settings.spinTime])
-
-  const handleWheelClick = () => {
-    if (!showWinner) {
-      spinWheel()
-    }
-  }
-
-  const handleCloseWinner = () => {
-    setShowWinner(false)
-    // Sync rotation states so wheel position is preserved when switching back to slowRotation + rotation
-    const finalRotation = frozenRotationRef.current !== null ? frozenRotationRef.current : (frozenRotation !== null ? frozenRotation : currentRotation)
-    setSlowRotation(0)
-    setRotation(finalRotation)
-    setCurrentRotation(finalRotation)
-    frozenRotationRef.current = null // Clear frozen rotation ref
-    setFrozenRotation(null) // Clear frozen rotation
-    setWinner(null)
-  }
-
-  const handleRemoveWinner = () => {
-    if (winner) {
-      removeName(winner.name)
-      setShowWinner(false)
-      // Sync rotation states so wheel position is preserved when switching back to slowRotation + rotation
-      const finalRotation = frozenRotationRef.current !== null ? frozenRotationRef.current : (frozenRotation !== null ? frozenRotation : currentRotation)
-      setSlowRotation(0)
-      setRotation(finalRotation)
-      setCurrentRotation(finalRotation)
-      frozenRotationRef.current = null // Clear frozen rotation ref
-      setFrozenRotation(null) // Clear frozen rotation
-      setWinner(null)
-    }
+  const sortResults = () => {
+    setResults(prev => [...prev].sort((a, b) => a.localeCompare(b)))
   }
 
   const clearResults = () => {
     setResults([])
   }
 
-  const sortResults = () => {
-    const sorted = [...results].sort((a, b) => {
-      return a.localeCompare(b, undefined, { sensitivity: 'base' })
-    })
-    setResults(sorted)
-  }
-
   const handleNew = () => {
-    // Reset everything
     setNames(['Ali', 'Beatriz', 'Charles', 'Diya', 'Eric', 'Fatima', 'Gabriel', 'Hanna'])
     setResults([])
-    setActiveTab('entries')
-    setNewName('')
-    setRotation(0)
-    setIsSpinning(false)
-    setSlowRotation(0)
-    setCurrentRotation(0)
-    setShowWinner(false)
     setWinner(null)
-    setIsSidebarHidden(false)
-    winnerProcessedRef.current = false
-    frozenRotationRef.current = null
-    setFrozenRotation(null)
+    setShowWinner(false)
   }
 
+  const handleImportExcel = async (file) => {
+    try {
+      const imported = await parseExcelFile(file)
+      if (imported && imported.length > 0) {
+        setNames(imported)
+        setWinner(null)
+        setShowWinner(false)
+        setActiveTab('entries')
+      } else {
+        alert('No valid entries found in the selected Excel file.')
+      }
+    } catch (err) {
+      console.error('Error importing Excel file:', err)
+      alert('Failed to read Excel file. Please ensure it is a valid .xlsx or .xls file.')
+    }
+  }
+
+  const handleSave = () => {
+    exportWinnersToPdf(results)
+  }
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      addName()
+    }
+  }
+
+  // Pointer angle index calculation
+  const getSegmentIndexAtRotation = (deg, count) => {
+    const sliceAngle = 360 / count
+    const norm = ((-deg % 360) + 360) % 360
+    const pointerAngle = ((norm + 90) % 360 + 360) % 360
+    return Math.floor(pointerAngle / sliceAngle) % count
+  }
+
+  // Main spin function
+  const spinWheel = useCallback(() => {
+    // Check synchronous lock to prevent double clicks or bubbling duplicates
+    if (isSpinningRef.current || isSpinning || activePool.length === 0) return
+
+    isSpinningRef.current = true
+    hasWinnerProcessedRef.current = false
+    setIsSpinning(true)
+    setShowWinner(false)
+    setWinner(null)
+
+    if (slowRafRef.current) {
+      cancelAnimationFrame(slowRafRef.current)
+      slowRafRef.current = null
+    }
+
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
+    }
+
+    // Capture pool at spin start to guarantee mathematical consistency
+    const poolCount = activePool.length
+    const currentPool = [...activePool]
+    const currentColors = [...activeColors]
+
+    // Select winner uniformly from activePool
+    const winnerIndex = Math.floor(Math.random() * poolCount)
+    const sliceAngle = 360 / poolCount
+    const targetSliceMid = winnerIndex * sliceAngle + sliceAngle / 2
+    const targetModAngle = ((targetSliceMid - 90) % 360 + 360) % 360
+    const desiredStopMod = (360 - targetModAngle) % 360
+
+    const startRotation = rotationRef.current
+    const currentMod = ((startRotation % 360) + 360) % 360
+
+    const fullRotations = 6 + Math.floor(Math.random() * 3)
+    let delta = desiredStopMod - currentMod
+    if (delta <= 0) {
+      delta += 360
+    }
+    const totalDelta = fullRotations * 360 + delta
+    const endRotation = startRotation + totalDelta
+
+    lastTickAngleRef.current = startRotation
+
+    // Duration from settings.spinTime
+    const duration = Math.max((settings.spinTime || 5) * 1000, 1500)
+    const startTime = performance.now()
+
+    const easeInOutCubic = (t) => {
+      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+    }
+
+    const animate = (currentTime) => {
+      const elapsed = currentTime - startTime
+      const progress = Math.min(elapsed / duration, 1)
+      const eased = easeInOutCubic(progress)
+      const current = startRotation + totalDelta * eased
+
+      // Ticking sound as slices cross pointer
+      if (settings.sound === 'Ticking sound' && settings.volume > 0) {
+        if (Math.abs(current - lastTickAngleRef.current) >= sliceAngle) {
+          playTickSound(settings.volume)
+          lastTickAngleRef.current = current
+        }
+      }
+
+      rotationRef.current = current
+      setRotation(current)
+
+      if (progress < 1) {
+        animationFrameRef.current = requestAnimationFrame(animate)
+      } else {
+        rotationRef.current = endRotation
+        setRotation(endRotation)
+        isSpinningRef.current = false
+        setIsSpinning(false)
+        animationFrameRef.current = null
+
+        // Only process and append the winner once
+        if (!hasWinnerProcessedRef.current) {
+          hasWinnerProcessedRef.current = true
+
+          // Determine winner strictly from segment under pointer
+          const selectedIndex = getSegmentIndexAtRotation(endRotation, poolCount)
+          const winnerName = currentPool[selectedIndex]
+          const winnerColor = currentColors[selectedIndex % currentColors.length]
+
+          setWinner({ name: winnerName, color: winnerColor, index: selectedIndex })
+          setResults(prev => [...prev, winnerName])
+          setActiveTab('results')
+
+          // After-spin effects
+          if (settings.afterSpinSound !== 'None') {
+            playApplauseSound(settings.afterSpinVolume, settings.afterSpinSound)
+          }
+          if (settings.sound === 'Read out the name') {
+            speakName(winnerName, settings.volume)
+          }
+          if (settings.launchConfetti) {
+            launchConfetti()
+          }
+
+          // Popup display
+          if (settings.displayPopup !== false) {
+            setTimeout(() => {
+              setShowWinner(true)
+            }, 600)
+          }
+        }
+      }
+    }
+
+    animationFrameRef.current = requestAnimationFrame(animate)
+  }, [isSpinning, activePool, settings, activeColors])
+
+  // Keyboard shortcut Ctrl+Enter to spin
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault()
-        spinWheel()
+        if (!isSpinningRef.current && !isSpinning && !showWinner && activePool.length > 0) {
+          spinWheel()
+        }
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [spinWheel])
+  }, [isSpinning, showWinner, activePool, spinWheel])
 
-  const colors = ['rgb(255, 217, 0)', 'rgb(0, 177, 0)', 'rgb(0, 195, 255)', 'rgb(255, 64, 64)'] // blue, green, yellow, red
+  const handleWheelClick = () => {
+    if (!isSpinningRef.current && !isSpinning && !showWinner && activePool.length > 0) {
+      spinWheel()
+    }
+  }
 
-  // Fullscreen mode - only show wheel
-  if (isFullscreen) {
-    return (
-      <div className="app fullscreen-mode">
-        <div className="fullscreen-wheel-container">
-          <button className="fullscreen-minimize-btn" onClick={() => setIsFullscreen(false)} title="Exit fullscreen">
-            <FiMaximize className="icon" />
-          </button>
-          <div className="wheel-container-fullscreen">
-            <div className="wheel-wrapper" onClick={handleWheelClick} style={{ cursor: (isSpinning || showWinner) ? 'not-allowed' : 'pointer' }}>
-              <svg 
-                className="wheel" 
-                viewBox="0 0 750 750"
-                ref={wheelRef}
-                style={{ transform: `rotate(${frozenRotationRef.current !== null ? frozenRotationRef.current : (frozenRotation !== null ? frozenRotation : (isSpinning || winner || showWinner) ? currentRotation : (slowRotation + rotation))}deg)` }}
-              >
-                <defs>
-                  <filter id="shadow">
-                    <feDropShadow dx="0" dy="4" stdDeviation="8" floodOpacity="0.3"/>
-                  </filter>
-                </defs>
-                {names.map((name, index) => {
-                  const angle = (360 / names.length)
-                  const startAngle = (index * angle - 90) * (Math.PI / 180)
-                  const endAngle = ((index + 1) * angle - 90) * (Math.PI / 180)
-                  const largeArc = angle > 180 ? 1 : 0
-                  
-                  const x1 = 375 + 340 * Math.cos(startAngle)
-                  const y1 = 375 + 340 * Math.sin(startAngle)
-                  const x2 = 375 + 340 * Math.cos(endAngle)
-                  const y2 = 375 + 340 * Math.sin(endAngle)
-                  
-                  const path = `M 375 375 L ${x1} ${y1} A 340 340 0 ${largeArc} 1 ${x2} ${y2} Z`
-                  
-                  const midAngle = (startAngle + endAngle) / 2
-                  const innerRadius = 120
-                  const outerRadius = 280
-                  const textRadius = (innerRadius + outerRadius) / 2
-                  const textX = 375 + textRadius * Math.cos(midAngle)
-                  const textY = 375 + textRadius * Math.sin(midAngle)
-                  const textRotationDeg = (midAngle * 180 / Math.PI)
-                  
-                  return (
-                    <g key={index}>
-                      <path
-                        d={path}
-                        fill={colors[index % colors.length]}
-                        stroke="black"
-                        strokeWidth="0.5"
-                      />
-                      <text
-                        x={textX}
-                        y={textY}
-                        fill="white"
-                        fontSize="18"
-                        fontWeight="bold"
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        transform={`rotate(${textRotationDeg} ${textX} ${textY})`}
-                        style={{ 
-                          whiteSpace: 'nowrap',
-                          letterSpacing: '0.5px'
-                        }}
-                      >
-                        {name}
-                      </text>
-                    </g>
-                  )
-                })}
-                <circle cx="375" cy="375" r="55" fill="white" filter="url(#shadow)"/>
-              </svg>
-              <div className="wheel-pointer"></div>
-              <div className="wheel-overlay" onClick={(e) => e.stopPropagation()}>
-                <div className="spin-text">{isSpinning ? 'Spinning...' : 'Click to spin'}</div>
-                <div className="spin-text-small">or press ctrl+enter</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
+  const handleRemoveWinner = () => {
+    if (winner) {
+      const idxToRemove = names.indexOf(winner.name)
+      if (idxToRemove !== -1) {
+        removeName(idxToRemove, winner.name)
+      }
+      setWinner(null)
+      setShowWinner(false)
+    }
+  }
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().then(() => {
+        setIsFullscreen(true)
+      }).catch(err => {
+        console.error('Error attempting to enable fullscreen:', err)
+      })
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().then(() => {
+          setIsFullscreen(false)
+        }).catch(err => {
+          console.error('Error attempting to exit fullscreen:', err)
+        })
+      }
+    }
+  }
+
+  const handleOpenCustomize = (tab = 'during-spin') => {
+    setCustomizeTab(tab)
+    setShowCustomize(true)
+  }
+
+  // Dynamic page background styling based on appearance settings
+  const dynamicPageStyle = {}
+  if (settings.pageBackgroundColor) {
+    const bg = settings.pageBgColor || '#18181b'
+    if (settings.displayColorGradient) {
+      dynamicPageStyle.background = `radial-gradient(circle at 40% 50%, ${bg} 0%, #050811 100%)`
+      dynamicPageStyle.backgroundColor = bg
+    } else {
+      dynamicPageStyle.background = bg
+      dynamicPageStyle.backgroundColor = bg
+    }
+  } else {
+    if (settings.displayColorGradient) {
+      dynamicPageStyle.background = 'radial-gradient(circle at 40% 50%, #1e1b4b 0%, #0f172a 50%, #020617 100%)'
+      dynamicPageStyle.backgroundColor = '#0b1120'
+    } else {
+      dynamicPageStyle.background = '#121212'
+      dynamicPageStyle.backgroundColor = '#121212'
+    }
   }
 
   return (
-    <div className="app">
-      {/* Header Navigation Bar */}
-      <header className="header">
-        <div className="header-right">
-          <button className="header-btn" title="Customize" onClick={() => setShowCustomize(true)}>
-            <FiSettings className="icon" />
-            <span>Customize</span>
-          </button>
-          <button className="header-btn" title="New" onClick={handleNew}>
-            <FiFile className="icon" />
-            <span>New</span>
-          </button>
-          <button className="header-btn" title="Open">
-            <FiFolder className="icon" />
-            <span>Open</span>
-          </button>
-          <button className="header-btn" title="Save">
-            <FiSave className="icon" />
-            <span>Save</span>
-          </button>
-          <button className="header-btn" title="Share">
-            <FiShare2 className="icon" />
-            <span>Share</span>
-          </button>
-          <button className="header-btn" title="Gallery">
-            <FiSearch className="icon" />
-            <span>Gallery</span>
-          </button>
-          <button className="header-btn" title="Fullscreen" onClick={() => setIsFullscreen(true)}>
-            <FiMaximize className="icon" />
-          </button>
-          <button className="header-btn dropdown" title="More">
-            <span>More</span>
-            <FiChevronDown className="icon" />
-          </button>
-          <button className="header-btn dropdown" title="Language">
-            <FiGlobe className="icon" />
-            <span>English</span>
-            <FiChevronDown className="icon" />
-          </button>
-        </div>
-      </header>
+    <div 
+      className="app"
+      style={dynamicPageStyle}
+    >
+      <Header 
+        onOpenCustomize={() => handleOpenCustomize('during-spin')}
+        onCustomizeClick={() => handleOpenCustomize('during-spin')}
+        onToggleFullscreen={toggleFullscreen}
+        onFullscreenClick={toggleFullscreen}
+        onNew={handleNew}
+        onImportExcel={handleImportExcel}
+        onSave={handleSave}
+      />
 
-      {/* Main Content */}
       <div className="main-content">
-        {/* Center - Wheel */}
-        <div className="wheel-container">
-          <div className="wheel-wrapper" onClick={handleWheelClick} style={{ cursor: (isSpinning || showWinner) ? 'not-allowed' : 'pointer' }}>
-            <svg 
-              className="wheel" 
-              viewBox="0 0 750 750"
-              ref={wheelRef}
-              style={{ transform: `rotate(${frozenRotationRef.current !== null ? frozenRotationRef.current : (frozenRotation !== null ? frozenRotation : (isSpinning || winner || showWinner) ? currentRotation : (slowRotation + rotation))}deg)` }}
-            >
-              <defs>
-                <filter id="shadow">
-                  <feDropShadow dx="0" dy="4" stdDeviation="8" floodOpacity="0.3"/>
-                </filter>
-              </defs>
-              {names.map((name, index) => {
-                const angle = (360 / names.length)
-                const startAngle = (index * angle - 90) * (Math.PI / 180)
-                const endAngle = ((index + 1) * angle - 90) * (Math.PI / 180)
-                const largeArc = angle > 180 ? 1 : 0
-                
-                const x1 = 375 + 340 * Math.cos(startAngle)
-                const y1 = 375 + 340 * Math.sin(startAngle)
-                const x2 = 375 + 340 * Math.cos(endAngle)
-                const y2 = 375 + 340 * Math.sin(endAngle)
-                
-                const path = `M 375 375 L ${x1} ${y1} A 340 340 0 ${largeArc} 1 ${x2} ${y2} Z`
-                
-                // Calculate middle angle for text positioning
-                const midAngle = (startAngle + endAngle) / 2
-                
-                // Position text along the radial direction (from inner to outer)
-                // Text should be horizontal along the slice length
-                const innerRadius = 120
-                const outerRadius = 280
-                const textRadius = (innerRadius + outerRadius) / 2
-                
-                // Calculate text position at middle radius of slice
-                const textX = 375 + textRadius * Math.cos(midAngle)
-                const textY = 375 + textRadius * Math.sin(midAngle)
-                
-                // Rotate text to align with the slice direction (radial, from center outward)
-                // Text should be horizontal along the slice length
-                const textRotationDeg = (midAngle * 180 / Math.PI)
-                
-                return (
-                  <g key={index}>
-                    <path
-                      d={path}
-                      fill={colors[index % colors.length]}
-                      stroke="black"
-                      strokeWidth="0.5"
-                    />
-                    <text
-                      x={textX}
-                      y={textY}
-                      fill="white"
-                      fontSize="18"
-                      fontWeight="bold"
-                      textAnchor="middle"
-                      dominantBaseline="middle"
-                      transform={`rotate(${textRotationDeg} ${textX} ${textY})`}
-                      style={{ 
-                        whiteSpace: 'nowrap',
-                        letterSpacing: '0.5px'
-                      }}
-                    >
-                      {name}
-                    </text>
-                  </g>
-                )
-              })}
-              <circle cx="375" cy="375" r="55" fill="white" filter="url(#shadow)"/>
-            </svg>
-            <div className="wheel-pointer"></div>
-            <div className="wheel-overlay" onClick={(e) => e.stopPropagation()}>
-              <div className="spin-text">{isSpinning ? 'Spinning...' : 'Click to spin'}</div>
-              <div className="spin-text-small">or press ctrl+enter</div>
-            </div>
-          </div>
-        </div>
+        <Wheel 
+          names={activePool}
+          colors={activeColors}
+          rotation={rotation}
+          isSpinning={isSpinning}
+          showWinner={showWinner}
+          winner={winner}
+          onWheelClick={handleWheelClick}
+          wheelRef={wheelRef}
+          settings={settings}
+        />
 
-        {/* Right Sidebar - Entries */}
-        <div className={`right-sidebar ${isSidebarHidden ? 'sidebar-hidden' : ''}`}>
-          {isSidebarHidden ? (
-            <div className="sidebar-header-hidden">
-              <label className="hide-checkbox">
-                <input 
-                  type="checkbox" 
-                  checked={isSidebarHidden}
-                  onChange={(e) => setIsSidebarHidden(e.target.checked)}
-                />
-                <span>Hide</span>
-              </label>
-            </div>
-          ) : (
-            <>
-              <div className="sidebar-header">
-                <div className="tabs">
-                  <button 
-                    className={`tab ${activeTab === 'entries' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('entries')}
-                  >
-                    Entries {names.length}
-                  </button>
-                  <button 
-                    className={`tab ${activeTab === 'results' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('results')}
-                  >
-                    Results {results.length}
-                  </button>
-                </div>
-                <label className="hide-checkbox">
-                  <input 
-                    type="checkbox" 
-                    checked={isSidebarHidden}
-                    onChange={(e) => setIsSidebarHidden(e.target.checked)}
-                  />
-                  <span>Hide</span>
-                </label>
-              </div>
-              
-              {activeTab === 'entries' ? (
-                <>
-                  <div className="sidebar-actions">
-                    <button className="action-btn" onClick={shuffleNames} title="Shuffle">
-                      <FiShuffle className="icon" />
-                      <span>Shuffle</span>
-                    </button>
-                    <button className="action-btn" onClick={sortNames} title="Sort">
-                      <span className="icon" style={{ display: 'flex', flexDirection: 'column', lineHeight: '0.5' }}>
-                        <FiArrowUp style={{ fontSize: '10px' }} />
-                        <FiArrowDown style={{ fontSize: '10px' }} />
-                      </span>
-                      <span>Sort</span>
-                    </button>
-                    <button className="action-btn dropdown" title="Add image">
-                      <span>Add image</span>
-                      <FiChevronDown className="icon" />
-                    </button>
-                    <label className="advanced-checkbox">
-                      <input 
-                        type="checkbox" 
-                        checked={showAdvanced}
-                        onChange={(e) => setShowAdvanced(e.target.checked)}
-                      />
-                      <span>Advanced</span>
-                    </label>
-                  </div>
-
-                  <div className="entries-list">
-                    <div className="add-name-input">
-                      <input
-                        type="text"
-                        placeholder="Add name..."
-                        value={newName}
-                        onChange={(e) => setNewName(e.target.value)}
-                        onKeyPress={handleKeyPress}
-                      />
-                      <button onClick={addName}>+</button>
-                    </div>
-                    <div className="names-container">
-                      {names.map((name, index) => (
-                        <div key={index} className="name-item">
-                          <span>{name}</span>
-                          <button 
-                            className="remove-btn"
-                            onClick={() => removeName(name)}
-                            title="Remove"
-                          >
-                            ×
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="sidebar-actions">
-                    <button className="action-btn" onClick={sortResults} title="Sort">
-                      <FiArrowUp className="icon" />
-                      <span>Sort</span>
-                    </button>
-                    <button className="action-btn" onClick={clearResults} title="Clear the list">
-                      <span className="icon">×</span>
-                      <span>Clear the list</span>
-                    </button>
-                  </div>
-
-                  <div className="entries-list">
-                    <div className="names-container">
-                      {results.length === 0 ? (
-                        <div style={{ color: '#888', textAlign: 'center', padding: '20px' }}>
-                          No results yet
-                        </div>
-                      ) : (
-                        results.map((name, index) => (
-                          <div key={index} className="name-item">
-                            <span>{name}</span>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-            </>
-          )}
-        </div>
+        <Sidebar 
+          names={names}
+          setNames={setNames}
+          results={results}
+          setResults={setResults}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          newName={newName}
+          setNewName={setNewName}
+          showAdvanced={showAdvanced}
+          setShowAdvanced={setShowAdvanced}
+          isSidebarHidden={isSidebarHidden}
+          setIsSidebarHidden={setIsSidebarHidden}
+          onAddName={addName}
+          addName={addName}
+          onRemoveName={removeName}
+          removeName={removeName}
+          onShuffleNames={shuffleNames}
+          shuffleNames={shuffleNames}
+          onSortNames={sortNames}
+          sortNames={sortNames}
+          onSortResults={sortResults}
+          onClearResults={clearResults}
+          onKeyPress={handleKeyPress}
+          handleKeyPress={handleKeyPress}
+          onCustomizeClick={() => handleOpenCustomize('during-spin')}
+        />
       </div>
 
-      {/* Winner Pop-up */}
-      {showWinner && winner && (
-        <div className="winner-overlay" onClick={handleCloseWinner}>
-          <div className="winner-popup" onClick={(e) => e.stopPropagation()}>
-            <div className="winner-header" style={{ backgroundColor: winner.color }}>
-              <h2>We have a winner!</h2>
-              <button className="winner-close-btn" onClick={handleCloseWinner}>×</button>
-            </div>
-            <div className="winner-content">
-              <div className="winner-name">{winner.name}</div>
-              <div className="winner-buttons">
-                <button className="winner-btn close-btn" onClick={handleCloseWinner}>Close</button>
-                <button className="winner-btn remove-btn" onClick={handleRemoveWinner}>Remove</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <WinnerModal 
+        winner={winner}
+        showWinner={showWinner}
+        onClose={() => {
+          setShowWinner(false)
+          setWinner(null)
+        }}
+        onRemove={handleRemoveWinner}
+        popupMessage={settings.popupMessage}
+        displayRemoveButton={settings.displayRemoveButton}
+        autoRemoveWinner={settings.autoRemoveWinner}
+      />
 
-      {/* Customize Pop-up */}
-      {showCustomize && (
-        <div className="customize-overlay" onClick={() => setShowCustomize(false)}>
-          <div className="customize-popup" onClick={(e) => e.stopPropagation()}>
-            <div className="customize-tabs">
-              <button 
-                className={`customize-tab ${customizeTab === 'during-spin' ? 'active' : ''}`}
-                onClick={() => setCustomizeTab('during-spin')}
-              >
-                During spin
-              </button>
-              <button 
-                className={`customize-tab ${customizeTab === 'after-spin' ? 'active' : ''}`}
-                onClick={() => setCustomizeTab('after-spin')}
-              >
-                After spin
-              </button>
-              <button 
-                className={`customize-tab ${customizeTab === 'appearance' ? 'active' : ''}`}
-                onClick={() => setCustomizeTab('appearance')}
-              >
-                Appearance
-              </button>
-            </div>
+      <CustomizeModal 
+        showCustomize={showCustomize}
+        setShowCustomize={setShowCustomize}
+        settings={settings}
+        setSettings={setSettings}
+        customizeTab={customizeTab}
+        setCustomizeTab={setCustomizeTab}
+        onClose={() => setShowCustomize(false)}
+      />
 
-            <div className="customize-content">
-              {customizeTab === 'during-spin' && (
-                <div className="customize-section">
-                  <div className="customize-field">
-                    <label className="customize-label">Sound</label>
-                    <div className="customize-sound-controls">
-                      <select 
-                        className="customize-select"
-                        value={settings.sound}
-                        onChange={(e) => setSettings({...settings, sound: e.target.value})}
-                      >
-                        <option>Ticking sound</option>
-                      </select>
-                      <button className="customize-icon-btn" title="Play">
-                        <FiPlay />
-                      </button>
-                      <button className="customize-icon-btn" title="Stop">
-                        <FiSquare />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-label">Volume</label>
-                    <div className="customize-slider-container" style={{'--slider-progress': `${settings.volume}%`}}>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={settings.volume}
-                        onChange={(e) => setSettings({...settings, volume: parseInt(e.target.value)})}
-                        className="customize-slider"
-                        style={{'--slider-progress': `${settings.volume}%`}}
-                      />
-                      <div className="customize-slider-labels">
-                        <span>0%</span>
-                        <span>25%</span>
-                        <span>50%</span>
-                        <span>75%</span>
-                        <span>100%</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="customize-checkboxes">
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.displayDuplicates}
-                        onChange={(e) => setSettings({...settings, displayDuplicates: e.target.checked})}
-                      />
-                      <span>Display duplicates</span>
-                      <FiHelpCircle className="customize-help-icon" />
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.spinSlowly}
-                        onChange={(e) => setSettings({...settings, spinSlowly: e.target.checked})}
-                      />
-                      <span>Spin slowly</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.showTitle}
-                        onChange={(e) => setSettings({...settings, showTitle: e.target.checked})}
-                      />
-                      <span>Show title</span>
-                    </label>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-label">Spin time (seconds)</label>
-                    <div className="customize-slider-container" style={{'--slider-progress': `${((settings.spinTime - 1) / 59) * 100}%`}}>
-                      <input
-                        type="range"
-                        min="1"
-                        max="60"
-                        value={settings.spinTime}
-                        onChange={(e) => setSettings({...settings, spinTime: parseInt(e.target.value)})}
-                        className="customize-slider"
-                        style={{'--slider-progress': `${((settings.spinTime - 1) / 59) * 100}%`}}
-                      />
-                      <div className="customize-slider-labels">
-                        <span>1</span>
-                        <span>10</span>
-                        <span>20</span>
-                        <span>30</span>
-                        <span>40</span>
-                        <span>50</span>
-                        <span>60</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-label-bold">Max number of names visible on the wheel</label>
-                    <p className="customize-description">All names in the text-box have the same chance of winning, regardless of this value.</p>
-                    <div className="customize-slider-container" style={{'--slider-progress': `${((settings.maxNamesVisible - 4) / 996) * 100}%`}}>
-                      <input
-                        type="range"
-                        min="4"
-                        max="1000"
-                        value={settings.maxNamesVisible}
-                        onChange={(e) => setSettings({...settings, maxNamesVisible: parseInt(e.target.value)})}
-                        className="customize-slider"
-                        style={{'--slider-progress': `${((settings.maxNamesVisible - 4) / 996) * 100}%`}}
-                      />
-                      <div className="customize-slider-labels">
-                        <span>4</span>
-                        <span>100</span>
-                        <span>200</span>
-                        <span>300</span>
-                        <span>400</span>
-                        <span>500</span>
-                        <span>600</span>
-                        <span>700</span>
-                        <span>800</span>
-                        <span>900</span>
-                        <span>1000</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {customizeTab === 'after-spin' && (
-                <div className="customize-section">
-                  <div className="customize-field">
-                    <label className="customize-label">Sound</label>
-                    <div className="customize-sound-controls">
-                      <select 
-                        className="customize-select"
-                        value={settings.afterSpinSound}
-                        onChange={(e) => setSettings({...settings, afterSpinSound: e.target.value})}
-                      >
-                        <option>Subdued applause</option>
-                      </select>
-                      <button className="customize-icon-btn" title="Play">
-                        <FiPlay />
-                      </button>
-                      <button className="customize-icon-btn" title="Stop">
-                        <FiSquare />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-label">Volume</label>
-                    <div className="customize-slider-container" style={{'--slider-progress': `${settings.afterSpinVolume}%`}}>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={settings.afterSpinVolume}
-                        onChange={(e) => setSettings({...settings, afterSpinVolume: parseInt(e.target.value)})}
-                        className="customize-slider"
-                        style={{'--slider-progress': `${settings.afterSpinVolume}%`}}
-                      />
-                      <div className="customize-slider-labels">
-                        <span>0%</span>
-                        <span>25%</span>
-                        <span>50%</span>
-                        <span>75%</span>
-                        <span>100%</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="customize-checkboxes">
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.animateWinningEntry}
-                        onChange={(e) => setSettings({...settings, animateWinningEntry: e.target.checked})}
-                      />
-                      <span>Animate winning entry</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.launchConfetti}
-                        onChange={(e) => setSettings({...settings, launchConfetti: e.target.checked})}
-                      />
-                      <span>Launch confetti</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.autoRemoveWinner}
-                        onChange={(e) => setSettings({...settings, autoRemoveWinner: e.target.checked})}
-                      />
-                      <span>Auto-remove winner after 5 seconds</span>
-                    </label>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.displayPopup}
-                        onChange={(e) => setSettings({...settings, displayPopup: e.target.checked})}
-                      />
-                      <span>Display popup with message:</span>
-                    </label>
-                    <input
-                      type="text"
-                      className="customize-text-input"
-                      value={settings.popupMessage}
-                      onChange={(e) => setSettings({...settings, popupMessage: e.target.value})}
-                      disabled={!settings.displayPopup}
-                    />
-                    <div className="customize-indented-checkbox">
-                      <label className="customize-checkbox-label">
-                        <input
-                          type="checkbox"
-                          checked={settings.displayRemoveButton}
-                          onChange={(e) => setSettings({...settings, displayRemoveButton: e.target.checked})}
-                          disabled={!settings.displayPopup}
-                        />
-                        <span>Display the "Remove" button</span>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.playClickSoundOnRemove}
-                        onChange={(e) => setSettings({...settings, playClickSoundOnRemove: e.target.checked})}
-                      />
-                      <span>Play a click sound when the winner is removed</span>
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              {customizeTab === 'appearance' && (
-                <div className="customize-section">
-                  <div className="customize-field">
-                    <div className="customize-toggle-container">
-                      <div className={`customize-toggle-option ${!settings.wheelBackgroundImage ? 'active' : ''}`}>
-                        <div className="customize-option-icon customize-wheel-icon">
-                          <div className="wheel-icon-slice" style={{backgroundColor: 'rgb(255, 64, 64)'}}></div>
-                          <div className="wheel-icon-slice" style={{backgroundColor: 'rgb(0, 177, 0)'}}></div>
-                          <div className="wheel-icon-slice" style={{backgroundColor: 'rgb(0, 195, 255)'}}></div>
-                          <div className="wheel-icon-slice" style={{backgroundColor: 'rgb(255, 217, 0)'}}></div>
-                          <div className="wheel-icon-slice" style={{backgroundColor: 'rgb(0, 195, 255)'}}></div>
-                          <div className="wheel-icon-slice" style={{backgroundColor: 'rgb(255, 165, 0)'}}></div>
-                        </div>
-                        <span className="customize-option-text">One color per section</span>
-                      </div>
-                      <label className="customize-toggle">
-                        <input
-                          type="checkbox"
-                          checked={settings.wheelBackgroundImage}
-                          onChange={(e) => setSettings({...settings, wheelBackgroundImage: e.target.checked})}
-                        />
-                        <span className="customize-toggle-slider"></span>
-                      </label>
-                      <div className={`customize-toggle-option ${settings.wheelBackgroundImage ? 'active' : ''}`}>
-                        <div className="customize-option-icon">
-                          <div className="cookie-icon">🍪</div>
-                        </div>
-                        <span className="customize-option-text">Wheel background image</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {settings.wheelBackgroundImage && (
-                    <div className="customize-field">
-                      <label className="customize-label">Wheel background image</label>
-                      <button className="customize-image-btn">
-                        <div className="cookie-icon">🍪</div>
-                        <span>Wheel background image</span>
-                        <FiChevronDown />
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="customize-field">
-                    <button className="customize-theme-btn">
-                      <span>Apply a theme</span>
-                      <FiChevronDown />
-                    </button>
-                  </div>
-
-                  <div className="customize-field">
-                    <div className="customize-colors-header">
-                      <label className="customize-label-bold">Customize colors</label>
-                      <FiHelpCircle className="customize-help-icon" />
-                    </div>
-                    <div className="customize-color-palettes">
-                      {[0, 1, 2, 3, 4, 5, 6, 7].map((index) => (
-                        <div key={index} className="customize-color-palette-item">
-                          <div className="customize-color-palette-icon">
-                            <FiDroplet />
-                          </div>
-                          <label className="customize-checkbox-label">
-                            <input
-                              type="checkbox"
-                              checked={settings.colorPalettes[index]}
-                              onChange={(e) => {
-                                const newPalettes = [...settings.colorPalettes]
-                                newPalettes[index] = e.target.checked
-                                setSettings({...settings, colorPalettes: newPalettes})
-                              }}
-                            />
-                          </label>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="customize-field">
-                    <button className="customize-image-btn">
-                      <FiImage />
-                      <span>Image at the center of the wheel</span>
-                      <FiChevronDown />
-                    </button>
-                  </div>
-
-                  <div className="customize-field">
-                    <label className="customize-label">Image size</label>
-                    <select 
-                      className="customize-select"
-                      value={settings.imageSize}
-                      onChange={(e) => setSettings({...settings, imageSize: e.target.value})}
-                    >
-                      <option>S</option>
-                      <option>M</option>
-                      <option>L</option>
-                    </select>
-                  </div>
-
-                  <div className="customize-checkboxes-grid">
-                    <label className="customize-checkbox-label">
-                      <FiDroplet className="customize-checkbox-icon" />
-                      <input
-                        type="checkbox"
-                        checked={settings.pageBackgroundColor}
-                        onChange={(e) => setSettings({...settings, pageBackgroundColor: e.target.checked})}
-                      />
-                      <span>Page background color</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.contours}
-                        onChange={(e) => setSettings({...settings, contours: e.target.checked})}
-                      />
-                      <span>Contours</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.displayColorGradient}
-                        onChange={(e) => setSettings({...settings, displayColorGradient: e.target.checked})}
-                      />
-                      <span>Display a color gradient on the page</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.wheelShadow}
-                        onChange={(e) => setSettings({...settings, wheelShadow: e.target.checked})}
-                      />
-                      <span>Wheel shadow</span>
-                    </label>
-                    <label className="customize-checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={settings.pointerChangesColor}
-                        onChange={(e) => setSettings({...settings, pointerChangesColor: e.target.checked})}
-                      />
-                      <span>Pointer changes color</span>
-                    </label>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="customize-buttons">
-              <button className="customize-btn cancel-btn" onClick={() => setShowCustomize(false)}>
-                Cancel
-              </button>
-              <button className="customize-btn ok-btn" onClick={() => setShowCustomize(false)}>
-                OK
-              </button>
-            </div>
-          </div>
-        </div>
+      {isSidebarHidden && (
+        <button 
+          className="fullscreen-exit-btn"
+          onClick={() => setIsSidebarHidden(false)}
+          title="Exit Fullscreen"
+        >
+          <FiMaximize />
+        </button>
       )}
     </div>
   )
