@@ -10,6 +10,8 @@
   gap: 8px;
   z-index: 100;
   position: relative;
+  max-width: 100vw;
+  overflow-x: auto;
 }
 
 .header-left {
@@ -36,6 +38,7 @@
   cursor: pointer;
   transition: all 0.2s;
   height: 32px;
+  white-space: nowrap;
 }
 
 .header-btn:hover {
@@ -57,7 +60,7 @@
 
 @media (max-width: 768px) {
   .header {
-    padding: 8px 15px;
+    padding: 8px 12px;
   }
 
   .header-btn {
